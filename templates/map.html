@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>俺たちの釣りマップ</title>
+
+<!-- Leaflet (地図表示) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<!-- exifr (写真のEXIF/GPS情報を読み取るライブラリ) -->
+<script src="https://unpkg.com/exifr/dist/full.umd.js"></script>
+
+<style>
+  :root {
+    --accent: #2563eb;
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --border: #e2e5ea;
+    --text: #1a1d23;
+    --muted: #6b7280;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    height: 100dvh;
+  }
+  header {
+    padding: 14px 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  header h1 {
+    font-size: 16px;
+    margin: 0;
+    font-weight: 600;
+  }
+  #drop-zone {
+    flex: 1;
+    min-width: 240px;
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    padding: 10px 16px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+  }
+  #drop-zone.dragover {
+    border-color: var(--accent);
+    background: #eef3ff;
+    color: var(--accent);
+  }
+  #file-input { display: none; }
+  #status {
+    font-size: 12px;
+    color: var(--muted);
+    min-width: 160px;
+    text-align: right;
+  }
+  main {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
+  #map { flex: 1; }
+  #sidebar {
+    width: 280px;
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+  #sidebar .empty {
+    padding: 20px;
+    color: var(--muted);
+    font-size: 13px;
+    text-align: center;
+  }
+  .photo-item {
+    display: flex;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    align-items: center;
+  }
+  .photo-item:hover { background: #f8f9fb; }
+  .photo-item img {
+    width: 48px;
+    height: 48px;
+    object-fit: cover;
+    border-radius: 6px;
+    background: #ddd;
+    flex-shrink: 0;
+  }
+  .photo-item .meta {
+    min-width: 0;
+  }
+  .photo-item .name {
+    font-size: 12.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .photo-item .coords {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .photo-item.no-gps .coords { color: #d97706; }
+  .popup-thumb {
+    width: 180px;
+    max-width: 100%;
+    border-radius: 6px;
+    display: block;
+    margin-bottom: 6px;
+  }
+  .popup-name { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+  .popup-coords { font-size: 12px; color: var(--muted); }
+  .popup-title-input {
+    display: block;
+    width: 100%;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 4px 6px;
+    margin-bottom: 4px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-sizing: border-box;
+  }
+  .popup-title-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  /* スマホ表示: 地図を大きく、一覧を下に小さく配置 */
+  @media (max-width: 768px) {
+    main {
+      flex-direction: column;
+    }
+    #map {
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+    #sidebar {
+      width: 100%;
+      flex: 0 0 auto;
+      max-height: 22vh;
+      border-left: none;
+      border-top: 1px solid var(--border);
+    }
+    .photo-item {
+      padding: 8px 14px;
+    }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📍 俺たちの釣りマップ</h1>
+  <div id="drop-zone">
+    ここに写真をドラッグ&ドロップ、またはクリックして選択（複数選択可 / iPhoneのHEIC・JPEG対応）
+    <input type="file" id="file-input" accept="image/*" multiple />
+  </div>
+  <div id="status">写真: 0件 / GPSあり: 0件</div>
+</header>
+
+<main>
+  <div id="map"></div>
+  <div id="sidebar">
+    <div class="empty">写真を追加すると一覧が表示されます</div>
+  </div>
+</main>
+
+<script>
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const statusEl = document.getElementById('status');
+const sidebar = document.getElementById('sidebar');
+
+// 地図の初期化（日本付近を初期表示。写真が追加されたら自動でフィットする）
+const map = L.map('map').setView([35.681236, 139.767125], 5);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  maxZoom: 19
+}).addTo(map);
+
+const markerGroup = L.layerGroup().addTo(map);
+let totalCount = 0;
+let gpsCount = 0;
+const loadedKeys = new Set(); // 読み込み済み写真のkey（重複追加を防ぐ）
+
+// レイアウト確定後にタイルが正しく表示されるようサイズを再計算
+window.addEventListener('load', () => setTimeout(() => map.invalidateSize(), 200));
+window.addEventListener('resize', () => map.invalidateSize());
+window.addEventListener('orientationchange', () => setTimeout(() => map.invalidateSize(), 200));
+
+function updateStatus() {
+  statusEl.textContent = `写真: ${totalCount}件 / GPSあり: ${gpsCount}件`;
+}
+
+function clearEmptyMessage() {
+  const empty = sidebar.querySelector('.empty');
+  if (empty) empty.remove();
+}
+
+// 標準の度分秒(DMS)配列 + 方角 を 10進の緯度経度に変換
+function toDecimal(dms, ref) {
+  if (dms == null) return null;
+  // exifr は通常すでに10進(number)で latitude/longitude を返す
+  if (typeof dms === 'number') {
+    if ((ref === 'S' || ref === 'W') && dms > 0) return -dms;
+    return dms;
+  }
+  return null;
+}
+
+async function handleFiles(fileList) {
+  const files = Array.from(fileList).filter(f => f.type.startsWith('image/') || /\.(heic|heif|jpg|jpeg|png|tiff?)$/i.test(f.name));
+  if (files.length === 0) return;
+
+  for (const file of files) {
+    const key = `${file.name}_${file.size}`;
+    if (loadedKeys.has(key)) continue; // 既に読み込み済みの写真はスキップ
+
+    let lat = null, lon = null, takenAt = null;
+
+    try {
+      // exifr.gps() は {latitude, longitude} を10進度で返してくれる（HEIC/JPEG両対応）
+      const gps = await exifr.gps(file);
+      if (gps && typeof gps.latitude === 'number' && typeof gps.longitude === 'number') {
+        lat = gps.latitude;
+        lon = gps.longitude;
+      }
+      try {
+        const exif = await exifr.parse(file, { pick: ['DateTimeOriginal'] });
+        if (exif && exif.DateTimeOriginal) takenAt = exif.DateTimeOriginal;
+      } catch (e) { /* 撮影日時が取れなくても無視 */ }
+    } catch (err) {
+      console.warn('EXIF読み取りに失敗:', file.name, err);
+    }
+
+    const record = { key, name: file.name, blob: file, lat, lon, takenAt, title: '' };
+    renderPhoto(record);
+    if (lat !== null && lon !== null) fitToMarkers();
+
+    // 写真本体とメタ情報をIndexedDBに保存し、アプリを閉じても残るようにする
+    savePhotoRecord(record).catch(err => console.warn('写真の保存に失敗しました:', err));
+  }
+}
+
+function renderPhoto(record) {
+  loadedKeys.add(record.key);
+  clearEmptyMessage();
+  totalCount++;
+
+  const blobUrl = URL.createObjectURL(record.blob);
+  const { lat, lon, takenAt, title, name } = record;
+
+  const item = document.createElement('div');
+  item.className = 'photo-item' + (lat === null ? ' no-gps' : '');
+
+  const img = document.createElement('img');
+  img.src = blobUrl;
+  item.appendChild(img);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const nameEl = document.createElement('div');
+  nameEl.className = 'name';
+  nameEl.textContent = name;
+  meta.appendChild(nameEl);
+
+  const coordsEl = document.createElement('div');
+  coordsEl.className = 'coords';
+  if (lat !== null && lon !== null) {
+    coordsEl.textContent = `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+    gpsCount++;
+  } else {
+    coordsEl.textContent = '位置情報なし';
+  }
+  meta.appendChild(coordsEl);
+  item.appendChild(meta);
+  sidebar.appendChild(item);
+
+  if (lat !== null && lon !== null) {
+    const marker = L.marker([lat, lon]);
+
+    const popupNode = document.createElement('div');
+
+    const popupImg = document.createElement('img');
+    popupImg.className = 'popup-thumb';
+    popupImg.src = blobUrl;
+    popupNode.appendChild(popupImg);
+
+    // いつでも編集できる題名入力欄（変更するとIndexedDBに保存される）
+    const titleInput = document.createElement('input');
+    titleInput.type = 'text';
+    titleInput.className = 'popup-title-input';
+    titleInput.placeholder = '題名を入力';
+    titleInput.value = title || '';
+    titleInput.addEventListener('change', () => {
+      record.title = titleInput.value;
+      updateTitleInDB(record.key, titleInput.value).catch(err => console.warn('題名の保存に失敗しました:', err));
+    });
+    popupNode.appendChild(titleInput);
+
+    if (takenAt) {
+      const dateEl = document.createElement('div');
+      dateEl.className = 'popup-coords';
+      dateEl.textContent = formatDate(takenAt);
+      popupNode.appendChild(dateEl);
+    }
+
+    marker.bindPopup(popupNode);
+    markerGroup.addLayer(marker);
+
+    item.addEventListener('click', () => {
+      map.setView([lat, lon], 15);
+      marker.openPopup();
+    });
+  } else {
+    item.addEventListener('click', () => {
+      alert('この写真にはGPS位置情報が含まれていません。\n(スクリーンショットや位置情報をオフにして撮影した写真にはGPSが付与されません)');
+    });
+  }
+
+  updateStatus();
+}
+
+function fitToMarkers() {
+  map.invalidateSize();
+  const layers = markerGroup.getLayers();
+  if (layers.length === 0) return;
+  if (layers.length === 1) {
+    map.setView(layers[0].getLatLng(), 15);
+  } else {
+    const group = L.featureGroup(layers);
+    map.fitBounds(group.getBounds().pad(0.2));
+  }
+}
+
+// --- 写真データの永続化（IndexedDB） ---
+// 画像本体・GPS・撮影日時・題名をブラウザ内に保存し、アプリを閉じても
+// 次回開いたときにピンと題名が復元されるようにする。
+const DB_NAME = 'photoGpsMapDB';
+const DB_VERSION = 1;
+const STORE_NAME = 'photos';
+let dbPromise = null;
+
+function openDB() {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(STORE_NAME, { keyPath: 'key' });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return dbPromise;
+}
+
+async function savePhotoRecord(record) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).put(record);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getAllPhotoRecords() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const req = tx.objectStore(STORE_NAME).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function updateTitleInDB(key, title) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    const getReq = tx.objectStore(STORE_NAME).get(key);
+    getReq.onsuccess = () => {
+      const record = getReq.result;
+      if (record) {
+        record.title = title;
+        tx.objectStore(STORE_NAME).put(record);
+      }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function loadSavedPhotos() {
+  try {
+    const records = await getAllPhotoRecords();
+    records.forEach(renderPhoto);
+    if (records.some(r => r.lat !== null && r.lon !== null)) fitToMarkers();
+  } catch (err) {
+    console.warn('保存済み写真の読み込みに失敗しました:', err);
+  }
+}
+
+function formatDate(value) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}/${m}/${day}`;
+}
+
+// --- イベント設定 ---
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+
+dropZone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  dropZone.classList.add('dragover');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  handleFiles(e.dataTransfer.files);
+});
+
+// 保存済みの写真（ピン・題名を含む）を読み込んで復元
+loadSavedPhotos();
+</script>
+
+</body>
+</html>
