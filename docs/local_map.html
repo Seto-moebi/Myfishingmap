@@ -165,6 +165,74 @@
     outline: none;
     border-color: var(--accent);
   }
+  .popup-delete-btn {
+    display: block;
+    width: 100%;
+    margin-top: 8px;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 6px 8px;
+    border: 1px solid #dc2626;
+    color: #dc2626;
+    background: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .popup-delete-btn:hover { background: #dc2626; color: #fff; }
+
+  /* 削除確認のポップアップ */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, .45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .modal-overlay[hidden] { display: none; }
+  .modal {
+    background: #fff;
+    border-radius: 12px;
+    padding: 18px;
+    width: calc(100% - 40px);
+    max-width: 320px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .3);
+  }
+  .modal img {
+    display: block;
+    width: 100%;
+    max-height: 200px;
+    object-fit: contain;
+    background: #f0f0f0;
+    border-radius: 8px;
+    margin-bottom: 10px;
+  }
+  .modal p {
+    margin: 0 0 14px;
+    font-size: 13.5px;
+    line-height: 1.5;
+    white-space: pre-line;
+  }
+  .modal .actions {
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+  }
+  .modal button {
+    font-size: 13px;
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: #fff;
+    cursor: pointer;
+  }
+  .modal button.danger {
+    background: #dc2626;
+    border-color: #dc2626;
+    color: #fff;
+    font-weight: 600;
+  }
 
   /* スマホ表示: 地図を大きく、一覧を下に小さく配置 */
   @media (max-width: 768px) {
@@ -207,6 +275,17 @@
     <div class="empty">写真を読み込み中…</div>
   </div>
 </main>
+
+<div class="modal-overlay" id="delete-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-modal-text">
+    <img id="delete-modal-img" alt="" />
+    <p id="delete-modal-text"></p>
+    <div class="actions">
+      <button type="button" id="delete-modal-cancel">キャンセル</button>
+      <button type="button" class="danger" id="delete-modal-confirm">削除する</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const dropZone = document.getElementById('drop-zone');
@@ -260,6 +339,16 @@ async function dbGetAll() {
   });
 }
 
+async function dbDelete(key) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 // 地図の初期化（日本付近を初期表示。写真が追加されたら自動でフィットする）
 const map = L.map('map').setView([35.681236, 139.767125], 5);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -272,6 +361,7 @@ let totalCount = 0;
 let gpsCount = 0;
 const loadedKeys = new Set(); // 読み込み済み写真のname_size（重複追加防止）
 const recordsByKey = new Map(); // key -> record（題名編集などで参照）
+const elementsByKey = new Map(); // key -> { record, item, marker, imgSrc }（削除時に参照）
 
 // レイアウト確定後にタイルが正しく表示されるようサイズを再計算
 window.addEventListener('load', () => setTimeout(() => map.invalidateSize(), 200));
@@ -383,8 +473,10 @@ function renderPhoto(record, imgSrc) {
   item.appendChild(meta);
   sidebar.appendChild(item);
 
+  let marker = null;
+
   if (lat !== null && lon !== null) {
-    const marker = L.marker([lat, lon]);
+    marker = L.marker([lat, lon]);
 
     const popupNode = document.createElement('div');
 
@@ -412,6 +504,13 @@ function renderPhoto(record, imgSrc) {
       popupNode.appendChild(dateEl);
     }
 
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.className = 'popup-delete-btn';
+    delBtn.textContent = '🗑 この写真を削除';
+    delBtn.addEventListener('click', () => openDeleteModal(record.key));
+    popupNode.appendChild(delBtn);
+
     marker.bindPopup(popupNode);
     markerGroup.addLayer(marker);
 
@@ -420,14 +519,78 @@ function renderPhoto(record, imgSrc) {
       marker.openPopup();
     });
   } else {
-    item.addEventListener('click', () => {
-      alert('この写真にはGPS位置情報が含まれていません。\n(スクリーンショットや位置情報をオフにして撮影した写真にはGPSが付与されません)');
-    });
+    // GPSが無い写真はマップに出ないので、クリックで削除ポップアップを開く
+    item.addEventListener('click', () => openDeleteModal(record.key));
   }
+
+  elementsByKey.set(record.key, { record, item, marker, imgSrc });
 
   updateStatus();
   return item;
 }
+
+// ── 削除ポップアップ ──
+const deleteModal = document.getElementById('delete-modal');
+const deleteModalImg = document.getElementById('delete-modal-img');
+const deleteModalText = document.getElementById('delete-modal-text');
+const deleteModalConfirm = document.getElementById('delete-modal-confirm');
+let pendingDeleteKey = null;
+
+function openDeleteModal(key) {
+  const entry = elementsByKey.get(key);
+  if (!entry) return;
+  pendingDeleteKey = key;
+  deleteModalImg.src = entry.imgSrc;
+  const noGps = entry.record.lat === null || entry.record.lon === null;
+  deleteModalText.textContent =
+    `「${entry.record.name}」を削除しますか？\nこの操作は取り消せません。` +
+    (noGps ? '\n（この写真はGPS情報が無いため地図には表示されていません）' : '');
+  deleteModal.hidden = false;
+}
+
+function closeDeleteModal() {
+  deleteModal.hidden = true;
+  pendingDeleteKey = null;
+}
+
+function removePhotoFromView(key) {
+  const entry = elementsByKey.get(key);
+  if (!entry) return;
+  const { record, item, marker } = entry;
+  if (marker) markerGroup.removeLayer(marker);
+  if (item && item.parentNode) item.parentNode.removeChild(item);
+  elementsByKey.delete(key);
+  recordsByKey.delete(key);
+  loadedKeys.delete(`${record.name}_${record.size}`);
+  totalCount = Math.max(0, totalCount - 1);
+  if (record.lat !== null && record.lon !== null) gpsCount = Math.max(0, gpsCount - 1);
+  updateStatus();
+  if (totalCount === 0) showEmptyMessage('写真を追加すると一覧が表示されます');
+}
+
+deleteModalConfirm.addEventListener('click', async () => {
+  if (!pendingDeleteKey) return;
+  const key = pendingDeleteKey;
+  deleteModalConfirm.disabled = true;
+  try {
+    await dbDelete(key);
+    removePhotoFromView(key);
+    closeDeleteModal();
+  } catch (err) {
+    console.warn('削除に失敗しました:', err);
+    alert('削除に失敗しました。もう一度お試しください。');
+  } finally {
+    deleteModalConfirm.disabled = false;
+  }
+});
+
+document.getElementById('delete-modal-cancel').addEventListener('click', closeDeleteModal);
+deleteModal.addEventListener('click', (e) => {
+  if (e.target === deleteModal) closeDeleteModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !deleteModal.hidden) closeDeleteModal();
+});
 
 function fitToMarkers() {
   map.invalidateSize();
