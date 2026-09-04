@@ -430,7 +430,8 @@ async function handleFiles(fileList) {
       await dbPut(record);
     } catch (err) {
       console.warn('この端末への保存に失敗しました:', file.name, err);
-      alert(`「${file.name}」の保存に失敗しました。`);
+      const detail = err ? `${err.name || ''}: ${err.message || err}` : '(詳細不明)';
+      alert(`「${file.name}」の保存に失敗しました。\n\n[詳細]\n${detail}`);
       loadedKeys.delete(dedupeKey);
       continue;
     }
@@ -618,7 +619,8 @@ async function loadSavedPhotos() {
     if (records.some(r => r.lat !== null && r.lon !== null)) fitToMarkers();
   } catch (err) {
     console.warn('保存済み写真の読み込みに失敗しました:', err);
-    showEmptyMessage('写真の読み込みに失敗しました。再読み込みしてください');
+    const detail = err ? `${err.name || ''}: ${err.message || err}` : '(詳細不明)';
+    showEmptyMessage(`写真の読み込みに失敗しました（${detail}）。再読み込みしてください`);
   }
 }
 
