@@ -138,18 +138,6 @@
     border-radius: 6px;
   }
   .photo-item .delete-btn:hover { background: #fdecec; color: #dc2626; }
-  .popup-delete-btn {
-    display: inline-block;
-    margin-top: 8px;
-    border: 1px solid var(--border);
-    background: #fff;
-    color: #dc2626;
-    font-size: 12px;
-    padding: 4px 10px;
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .popup-delete-btn:hover { background: #fdecec; border-color: #dc2626; }
   .popup-thumb {
     width: 180px;
     max-width: 100%;
@@ -436,15 +424,6 @@ function renderPhoto(record) {
       dateEl.textContent = formatDate(takenAt);
       popupNode.appendChild(dateEl);
     }
-
-    const popupDelBtn = document.createElement('button');
-    popupDelBtn.type = 'button';
-    popupDelBtn.className = 'popup-delete-btn';
-    popupDelBtn.textContent = 'この写真を削除';
-    popupDelBtn.addEventListener('click', () => {
-      removePhoto({ record, item, marker, blobUrl, hasGps });
-    });
-    popupNode.appendChild(popupDelBtn);
 
     marker.bindPopup(popupNode);
     markerGroup.addLayer(marker);
