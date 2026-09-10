@@ -12,6 +12,9 @@
 <!-- exifr (写真のEXIF/GPS情報を読み取るライブラリ) -->
 <script src="https://unpkg.com/exifr/dist/full.umd.js"></script>
 
+<!-- マップ一覧の定義（index.html と共用） -->
+<script src="config.js"></script>
+
 <style>
   :root {
     --accent: #2563eb;
@@ -122,6 +125,31 @@
     margin-top: 2px;
   }
   .photo-item.no-gps .coords { color: #d97706; }
+  .photo-item .delete-btn {
+    margin-left: auto;
+    flex-shrink: 0;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1;
+    padding: 6px 8px;
+    cursor: pointer;
+    border-radius: 6px;
+  }
+  .photo-item .delete-btn:hover { background: #fdecec; color: #dc2626; }
+  .popup-delete-btn {
+    display: inline-block;
+    margin-top: 8px;
+    border: 1px solid var(--border);
+    background: #fff;
+    color: #dc2626;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .popup-delete-btn:hover { background: #fdecec; border-color: #dc2626; }
   .popup-thumb {
     width: 180px;
     max-width: 100%;
@@ -146,6 +174,25 @@
     outline: none;
     border-color: var(--accent);
   }
+
+  header .back-link {
+    font-size: 12px;
+    color: var(--muted);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  header .back-link:hover { color: var(--accent); }
+
+  /* 保存に失敗したときだけ出す警告バー */
+  #save-warning {
+    background: #fef2f2;
+    color: #b91c1c;
+    border-bottom: 1px solid #fecaca;
+    padding: 8px 20px;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  #save-warning a { color: inherit; }
 
   /* スマホ表示: 地図を大きく、一覧を下に小さく配置 */
   @media (max-width: 768px) {
@@ -172,13 +219,16 @@
 <body>
 
 <header>
-  <h1>📍 俺たちの釣りマップ</h1>
+  <a href="index.html" class="back-link">← マップ一覧</a>
+  <h1 id="map-title">📍 俺たちの釣りマップ</h1>
   <div id="drop-zone">
     ここに写真をドラッグ&ドロップ、またはクリックして選択（複数選択可 / iPhoneのHEIC・JPEG対応）
     <input type="file" id="file-input" accept="image/*" multiple />
   </div>
   <div id="status">写真: 0件 / GPSあり: 0件</div>
 </header>
+
+<div id="save-warning" hidden></div>
 
 <main>
   <div id="map"></div>
@@ -192,6 +242,39 @@ const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const statusEl = document.getElementById('status');
 const sidebar = document.getElementById('sidebar');
+const saveWarningEl = document.getElementById('save-warning');
+
+// ?map=... でマップを識別する。写真・ピン・題名はこのIDごとに分けて保存され、
+// 別のマップを開いても混ざらない。指定が無ければ 'default'。
+const MAP_ID = (new URLSearchParams(location.search).get('map') || 'default').trim() || 'default';
+
+// config.js の定義からこのマップの表示名を引いてヘッダーに出す
+(function setMapTitle() {
+  const maps = (typeof FISHING_MAPS !== 'undefined' && Array.isArray(FISHING_MAPS)) ? FISHING_MAPS : [];
+  const entry = maps.find(m => m.id === MAP_ID);
+  if (entry && entry.label) {
+    document.getElementById('map-title').textContent = `📍 ${entry.label}`;
+    document.title = entry.label;
+  }
+})();
+
+// ブラウザに「このサイトのデータを勝手に消さないで」と依頼する。
+// 許可されると、しばらく使わなくてもピンが消えにくくなる（対応ブラウザのみ）。
+if (navigator.storage && navigator.storage.persist) {
+  navigator.storage.persisted().then(already => {
+    if (!already) navigator.storage.persist();
+  }).catch(() => {});
+}
+
+let saveHadError = false;
+function showSaveWarning() {
+  if (saveHadError) return;
+  saveHadError = true;
+  saveWarningEl.textContent = '一部の写真をこの端末に保存できませんでした。'
+    + 'ブラウザの空き容量が不足しているか、プライベートブラウズの可能性があります。'
+    + 'このまま閉じると、保存できなかった写真のピンは次回復元されません。';
+  saveWarningEl.hidden = false;
+}
 
 // 地図の初期化（日本付近を初期表示。写真が追加されたら自動でフィットする）
 const map = L.map('map').setView([35.681236, 139.767125], 5);
@@ -235,7 +318,7 @@ async function handleFiles(fileList) {
   if (files.length === 0) return;
 
   for (const file of files) {
-    const key = `${file.name}_${file.size}`;
+    const key = `${MAP_ID}::${file.name}_${file.size}`;
     if (loadedKeys.has(key)) continue; // 既に読み込み済みの写真はスキップ
 
     let lat = null, lon = null, takenAt = null;
@@ -255,13 +338,25 @@ async function handleFiles(fileList) {
       console.warn('EXIF読み取りに失敗:', file.name, err);
     }
 
-    const record = { key, name: file.name, blob: file, lat, lon, takenAt, title: '' };
+    const record = { key, mapId: MAP_ID, name: file.name, blob: file, lat, lon, takenAt, title: '' };
     renderPhoto(record);
     if (lat !== null && lon !== null) fitToMarkers();
 
-    // 写真本体とメタ情報をIndexedDBに保存し、アプリを閉じても残るようにする
-    savePhotoRecord(record).catch(err => console.warn('写真の保存に失敗しました:', err));
+    // 写真本体とメタ情報をIndexedDBに保存し、アプリを閉じても残るようにする。
+    // 保存できたことを読み戻して確認し、失敗していれば画面に警告を出す。
+    savePhotoRecord(record)
+      .then(() => verifySaved(record.key))
+      .catch(err => {
+        console.warn('写真の保存に失敗しました:', file.name, err);
+        showSaveWarning();
+      });
   }
+}
+
+// put 後に実際に読み戻せるか確認する（静かに失敗する環境の検知用）
+async function verifySaved(key) {
+  const rec = await getPhotoRecord(key);
+  if (!rec) throw new Error('保存後に読み戻せませんでした: ' + key);
 }
 
 function renderPhoto(record) {
@@ -271,6 +366,8 @@ function renderPhoto(record) {
 
   const blobUrl = URL.createObjectURL(record.blob);
   const { lat, lon, takenAt, title, name } = record;
+  const hasGps = lat !== null && lon !== null;
+  let marker = null;
 
   const item = document.createElement('div');
   item.className = 'photo-item' + (lat === null ? ' no-gps' : '');
@@ -296,10 +393,23 @@ function renderPhoto(record) {
   }
   meta.appendChild(coordsEl);
   item.appendChild(meta);
+
+  const delBtn = document.createElement('button');
+  delBtn.className = 'delete-btn';
+  delBtn.type = 'button';
+  delBtn.textContent = '✕';
+  delBtn.title = 'この写真を削除';
+  delBtn.setAttribute('aria-label', 'この写真を削除');
+  delBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    removePhoto({ record, item, marker, blobUrl, hasGps });
+  });
+  item.appendChild(delBtn);
+
   sidebar.appendChild(item);
 
   if (lat !== null && lon !== null) {
-    const marker = L.marker([lat, lon]);
+    marker = L.marker([lat, lon]);
 
     const popupNode = document.createElement('div');
 
@@ -327,6 +437,15 @@ function renderPhoto(record) {
       popupNode.appendChild(dateEl);
     }
 
+    const popupDelBtn = document.createElement('button');
+    popupDelBtn.type = 'button';
+    popupDelBtn.className = 'popup-delete-btn';
+    popupDelBtn.textContent = 'この写真を削除';
+    popupDelBtn.addEventListener('click', () => {
+      removePhoto({ record, item, marker, blobUrl, hasGps });
+    });
+    popupNode.appendChild(popupDelBtn);
+
     marker.bindPopup(popupNode);
     markerGroup.addLayer(marker);
 
@@ -341,6 +460,35 @@ function renderPhoto(record) {
   }
 
   updateStatus();
+}
+
+// サイドバー・地図・保存データ（IndexedDB）から写真を1件削除する
+function removePhoto({ record, item, marker, blobUrl, hasGps }) {
+  const label = record.title || record.name;
+  if (!confirm(`「${label}」を削除しますか？\nこの端末に保存されたこの写真のデータも消えます。`)) return;
+
+  if (marker) {
+    map.closePopup();
+    markerGroup.removeLayer(marker);
+  }
+  if (item && item.parentNode) item.remove();
+  if (blobUrl) URL.revokeObjectURL(blobUrl);
+
+  loadedKeys.delete(record.key);
+  totalCount = Math.max(0, totalCount - 1);
+  if (hasGps) gpsCount = Math.max(0, gpsCount - 1);
+  updateStatus();
+  restoreEmptyMessage();
+
+  deletePhotoRecord(record.key).catch(err => console.warn('写真の削除に失敗しました:', err));
+}
+
+function restoreEmptyMessage() {
+  if (totalCount > 0 || sidebar.querySelector('.empty')) return;
+  const empty = document.createElement('div');
+  empty.className = 'empty';
+  empty.textContent = '写真を追加すると一覧が表示されます';
+  sidebar.appendChild(empty);
 }
 
 function fitToMarkers() {
@@ -386,12 +534,32 @@ async function savePhotoRecord(record) {
   });
 }
 
+async function deletePhotoRecord(key) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 async function getAllPhotoRecords() {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readonly');
     const req = tx.objectStore(STORE_NAME).getAll();
     req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getPhotoRecord(key) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const req = tx.objectStore(STORE_NAME).get(key);
+    req.onsuccess = () => resolve(req.result || null);
     req.onerror = () => reject(req.error);
   });
 }
@@ -414,13 +582,29 @@ async function updateTitleInDB(key, title) {
 }
 
 async function loadSavedPhotos() {
+  let records;
   try {
-    const records = await getAllPhotoRecords();
-    records.forEach(renderPhoto);
-    if (records.some(r => r.lat !== null && r.lon !== null)) fitToMarkers();
+    records = await getAllPhotoRecords();
   } catch (err) {
     console.warn('保存済み写真の読み込みに失敗しました:', err);
+    return;
   }
+
+  // このマップの写真だけを表示する。mapId が無い旧データは
+  // どのマップにも属さないので、暫定的に現在のマップで拾う。
+  const mine = records.filter(r => r.mapId === MAP_ID || r.mapId === undefined);
+
+  let restored = 0;
+  for (const r of mine) {
+    try {
+      renderPhoto(r);
+      restored++;
+    } catch (err) {
+      console.warn('保存済み写真の復元に失敗しました:', r && r.key, err);
+    }
+  }
+  if (mine.some(r => r.lat !== null && r.lon !== null)) fitToMarkers();
+  console.info(`復元した写真: ${restored}件 (map=${MAP_ID})`);
 }
 
 function formatDate(value) {
